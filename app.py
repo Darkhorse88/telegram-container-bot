@@ -1,5 +1,6 @@
 # 🤖 TELEGRAM BOT - Проверка оплаты контейнеров
-# Версия: 2.1 (WEBHOOK MODE) - PRODUCTION READY + FIX
+# Версия: 2.2 (WEBHOOK MODE) - PRODUCTION READY
+# ✅ СТАТУСЫ: Оплачено | Оплаты нет | Постоплата (С БОЛЬШОЙ БУКВЫ)
 
 import os
 import json
@@ -25,7 +26,6 @@ logger = logging.getLogger(__name__)
 # ⚙️ КОНФИГУРАЦИЯ (БЕЗОПАСНАЯ)
 # ════════════════════════════════════════════════════════════════
 
-# 🔐 Получаем токен из переменных окружения (НЕ жестко закодирован!)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("❌ ОШИБКА: TELEGRAM_TOKEN не установлен в переменных окружения!")
@@ -33,7 +33,6 @@ if not TELEGRAM_TOKEN:
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-# Webhook URL для регистрации бота
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not WEBHOOK_URL:
     logger.error("❌ ОШИБКА: WEBHOOK_URL не установлена в переменных окружения!")
@@ -41,11 +40,9 @@ if not WEBHOOK_URL:
 
 WEBHOOK_PATH = "/telegram"
 
-# Google Sheets конфигурация
 SHEET_ID = os.getenv("SHEET_ID", "1cTfkGG2HC8HQBgt8ePfpQ-diyoJStvvEx4EAOdYmcbk")
 SHEET_NAME = os.getenv("SHEET_NAME", "Контейнеры")
 
-# Credentials - НОВЫЙ СПОСОБ (из переменной окружения)
 CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 if not CREDENTIALS_JSON:
     logger.warning("⚠️ GOOGLE_CREDENTIALS не установлены. Попытка загрузить из файла...")
@@ -118,7 +115,7 @@ class SheetManager:
             return {'ошибка': str(e)}
     
     def get_unpaid_containers(self):
-        """Получает список неоплаченных контейнеров"""
+        """Получает список контейнеров со статусом 'Оплаты нет'"""
         try:
             if not self.sheet:
                 return {'ошибка': 'Нет подключения'}
@@ -126,8 +123,9 @@ class SheetManager:
             all_records = self.sheet.get_all_records()
             unpaid = []
             for record in all_records:
-                status = record.get('Статус', '').lower().strip()
-                if status in ['нет оплаты', 'задолженость', 'просрочено']:
+                status = record.get('Статус', '').strip()
+                # ✅ ТОЧНОЕ СОВПАДЕНИЕ: "Оплаты нет" (с большой буквы)
+                if status == 'Оплаты нет':
                     unpaid.append({
                         'контейнер': record.get('Контейнер'),
                         'статус': record.get('Статус')
@@ -145,9 +143,11 @@ class SheetManager:
             
             all_records = self.sheet.get_all_records()
             total = len(all_records)
-            paid = sum(1 for r in all_records if r.get('Статус', '').lower().strip() == 'оплачено')
-            unpaid = sum(1 for r in all_records if r.get('Статус', '').lower().strip() in ['нет оплаты', 'задолженость', 'просрочено'])
-            postpay = sum(1 for r in all_records if r.get('Статус', '').lower().strip() == 'постоплата')
+            
+            # ✅ ТОЧНЫЕ СТАТУСЫ С БОЛЬШОЙ БУКВЫ
+            paid = sum(1 for r in all_records if r.get('Статус', '').strip() == 'Оплачено')
+            unpaid = sum(1 for r in all_records if r.get('Статус', '').strip() == 'Оплаты нет')
+            postpay = sum(1 for r in all_records if r.get('Статус', '').strip() == 'Постоплата')
             
             return {
                 'всего': total,
@@ -270,14 +270,13 @@ class TelegramBot:
         result = self.sheet_manager.get_container_status(container_id)
         
         if result.get('найден'):
+            # ✅ ТОЧНЫЕ СТАТУСЫ С БОЛЬШОЙ БУКВЫ
             status_emoji = {
-                'оплачено': '✅',
-                'постоплата': '🔄',
-                'нет оплаты': '❌',
-                'задолженость': '💸',
-                'просрочено': '⚠️'
+                'Оплачено': '✅',
+                'Постоплата': '🔄',
+                'Оплаты нет': '❌'
             }
-            emoji = status_emoji.get(result['статус'].lower(), '❓')
+            emoji = status_emoji.get(result['статус'], '❓')
             
             message = f"""{emoji} <b>Контейнер:</b> {result['контейнер']}
 <b>Статус:</b> {result['статус']}"""
@@ -320,7 +319,7 @@ class TelegramBot:
 
 📦 Всего: <b>{stats['всего']}</b>
 ✅ Оплачено: <b>{stats['оплачено']}</b>
-💰 Неоплачено: <b>{stats['неоплачено']}</b>
+❌ Неоплачено: <b>{stats['неоплачено']}</b>
 🔄 Постоплата: <b>{stats['постоплата']}</b>
 
 Процент оплаты: <b>{percentage}%</b>"""
@@ -355,83 +354,49 @@ def create_app():
         """Health check endpoint для мониторинга"""
         return {'status': 'ok', 'timestamp': datetime.now().isoformat()}, 200
 
-    @app.route(WEBHOOK_PATH, methods=['POST'])
-    def telegram_webhook():
-        """Основной webhook для получения обновлений от Telegram"""
-        try:
-            data = request.get_json()
-            
-            if not data:
-                logger.warning("Получен пустой webhook")
-                return {'ok': True}, 200
-            
-            logger.info(f"📥 Webhook получен: update_id={data.get('update_id')}")
-            
-            # Обрабатываем сообщение
-            if 'message' in data:
-                bot.handle_message(data['message'])
-            
-            return {'ok': True}, 200
-        except Exception as e:
-            logger.error(f"Ошибка обработки webhook: {e}")
-            return {'ok': False, 'error': str(e)}, 500
-
-    @app.route('/init-webhook', methods=['GET', 'POST'])
+    @app.route('/init-webhook', methods=['GET'])
     def init_webhook():
-        """Регистрирует webhook в Telegram API (НОВЫЙ ENDPOINT)"""
+        """Инициализирует webhook Telegram бота"""
         try:
             webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-            logger.info(f"🔧 Регистрирую webhook: {webhook_url}")
-            
-            data = {"url": webhook_url}
+            logger.info(f"📍 Webhook URL: {webhook_url}")
             
             response = httpx.post(
                 f"{TELEGRAM_API_URL}/setWebhook",
-                json=data,
+                json={"url": webhook_url},
                 timeout=10
             )
             
             result = response.json()
-            logger.info(f"✅ Ответ setWebhook: {result}")
+            logger.info(f"🔗 Webhook response: {result}")
+            
             return result, 200
         except Exception as e:
-            logger.error(f"❌ Ошибка регистрации webhook: {e}")
+            logger.error(f"❌ Ошибка инициализации webhook: {e}")
+            return {'error': str(e)}, 500
+
+    @app.route(WEBHOOK_PATH, methods=['POST'])
+    def telegram_webhook():
+        """Получает обновления от Telegram"""
+        try:
+            update = request.json
+            
+            if 'message' in update:
+                message = update['message']
+                bot.handle_message(message)
+            
+            return {'ok': True}, 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки webhook: {e}")
             return {'ok': False, 'error': str(e)}, 500
-
-    @app.errorhandler(404)
-    def not_found(error):
-        """Обработка 404 ошибок"""
-        return {'error': 'Not found'}, 404
-
-    @app.errorhandler(500)
-    def internal_error(error):
-        """Обработка 500 ошибок"""
-        logger.error(f"Internal server error: {error}")
-        return {'error': 'Internal server error'}, 500
 
     return app
 
-# Создаем app для Gunicorn
-app = create_app()
+
+# ════════════════════════════════════════════════════════════════
+# 🚀 ЗАПУСК ПРИЛОЖЕНИЯ
+# ════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    port = int(os.getenv("PORT", 5000))
-    logger.info(f"🚀 Запуск бота на порту {port}")
-    logger.info(f"📍 Webhook URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
-    
-    # Инициализируем webhook при старте (если это локальный запуск)
-    import threading
-    def init_webhook_on_start():
-        time.sleep(2)  # Даем приложению время на старт
-        logger.info("🔄 Инициализирую webhook...")
-        try:
-            with app.test_client() as client:
-                response = client.get('/init-webhook')
-                logger.info(f"Webhook инициализирован: {response}")
-        except Exception as e:
-            logger.error(f"Ошибка при инициализации webhook: {e}")
-    
-    webhook_thread = threading.Thread(target=init_webhook_on_start, daemon=True)
-    webhook_thread.start()
-    
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app = create_app()
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
