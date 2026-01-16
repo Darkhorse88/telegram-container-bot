@@ -1,5 +1,5 @@
 # 🤖 TELEGRAM BOT - Проверка оплаты контейнеров
-# Версия: 2.0 (WEBHOOK MODE) - PRODUCTION READY
+# Версия: 2.1 (WEBHOOK MODE) - PRODUCTION READY + FIX
 
 import os
 import json
@@ -9,6 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import httpx
 import logging
+import time
 
 # ════════════════════════════════════════════════════════════════
 # 📋 ЛОГИРОВАНИЕ
@@ -27,21 +28,30 @@ logger = logging.getLogger(__name__)
 # 🔐 Получаем токен из переменных окружения (НЕ жестко закодирован!)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
-    raise ValueError("❌ ОШИБКА: TELEGRAM_TOKEN не установлен в переменных окружения!")
+    logger.error("❌ ОШИБКА: TELEGRAM_TOKEN не установлен в переменных окружения!")
+    raise ValueError("TELEGRAM_TOKEN not set")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # Webhook URL для регистрации бота
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not WEBHOOK_URL:
-    raise ValueError("❌ ОШИБКА: WEBHOOK_URL не установлена в переменных окружения!")
+    logger.error("❌ ОШИБКА: WEBHOOK_URL не установлена в переменных окружения!")
+    raise ValueError("WEBHOOK_URL not set")
 
 WEBHOOK_PATH = "/telegram"
 
 # Google Sheets конфигурация
-CREDENTIALS_PATH = os.getenv("CREDENTIALS_PATH", "telegram-bot-pay-cont.json")
 SHEET_ID = os.getenv("SHEET_ID", "1cTfkGG2HC8HQBgt8ePfpQ-diyoJStvvEx4EAOdYmcbk")
-SHEET_NAME = "Контейнеры"
+SHEET_NAME = os.getenv("SHEET_NAME", "Контейнеры")
+
+# Credentials - НОВЫЙ СПОСОБ (из переменной окружения)
+CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
+if not CREDENTIALS_JSON:
+    logger.warning("⚠️ GOOGLE_CREDENTIALS не установлены. Попытка загрузить из файла...")
+    CREDENTIALS_PATH = "telegram-bot-pay-cont.json"
+else:
+    CREDENTIALS_PATH = None
 
 
 # ════════════════════════════════════════════════════════════════
@@ -51,32 +61,39 @@ SHEET_NAME = "Контейнеры"
 class SheetManager:
     """Управляет подключением и операциями с Google Sheets"""
     
-    def __init__(self, credentials_path, sheet_id, sheet_name):
+    def __init__(self, credentials_json=None, credentials_path=None, sheet_id=None, sheet_name=None):
         self.sheet_id = sheet_id
         self.sheet_name = sheet_name
         self.sheet = None
         self.client = None
         
         try:
-            # Поддержка JSON строки или пути к файлу
-            if credentials_path.startswith('{'):
-                creds_dict = json.loads(credentials_path)
+            if credentials_json:
+                logger.info("📌 Используем credentials из переменной окружения")
+                try:
+                    creds_dict = json.loads(credentials_json)
+                except json.JSONDecodeError as e:
+                    logger.error(f"❌ Ошибка парсинга JSON credentials: {e}")
+                    return
+                
                 credentials = Credentials.from_service_account_info(
                     creds_dict,
                     scopes=['https://www.googleapis.com/auth/spreadsheets']
                 )
-            else:
+            elif credentials_path and os.path.exists(credentials_path):
+                logger.info(f"📌 Используем credentials из файла: {credentials_path}")
                 credentials = Credentials.from_service_account_file(
                     credentials_path,
                     scopes=['https://www.googleapis.com/auth/spreadsheets']
                 )
+            else:
+                logger.error("❌ Не найдены Google credentials!")
+                return
             
             self.client = gspread.authorize(credentials)
             self.sheet = self.client.open_by_key(sheet_id).worksheet(sheet_name)
-            logger.info("✅ Подключено к Google Sheets")
-        except FileNotFoundError:
-            logger.error(f"❌ Файл учетных данных не найден: {credentials_path}")
-            self.sheet = None
+            logger.info("✅ Подключено к Google Sheets успешно!")
+            
         except Exception as e:
             logger.error(f"❌ Ошибка подключения к Google Sheets: {e}")
             self.sheet = None
@@ -219,7 +236,10 @@ class TelegramBot:
         
         except Exception as e:
             logger.error(f"Ошибка при обработке сообщения: {e}")
-            self.send_message(chat_id, f"❌ Произошла ошибка: {str(e)}")
+            try:
+                self.send_message(chat_id, f"❌ Произошла ошибка: {str(e)}")
+            except:
+                pass
     
     def send_start_menu(self, chat_id):
         """Отправляет стартовое меню с кнопками"""
@@ -312,84 +332,106 @@ class TelegramBot:
 # 🌐 FLASK ПРИЛОЖЕНИЕ
 # ════════════════════════════════════════════════════════════════
 
-app = Flask(__name__)
-
-# Инициализация компонентов
-try:
-    sheet_manager = SheetManager(CREDENTIALS_PATH, SHEET_ID, SHEET_NAME)
-    bot = TelegramBot(TELEGRAM_TOKEN, sheet_manager)
-    logger.info("✅ Бот инициализирован успешно")
-except Exception as e:
-    logger.error(f"❌ Ошибка инициализации: {e}")
-    raise
-
-
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint для мониторинга"""
-    return {'status': 'ok', 'timestamp': datetime.now().isoformat()}, 200
-
-
-@app.route(WEBHOOK_PATH, methods=['POST'])
-def telegram_webhook():
-    """Основной webhook для получения обновлений от Telegram"""
+def create_app():
+    """Создает Flask приложение"""
+    app = Flask(__name__)
+    
+    # Инициализация компонентов
     try:
-        data = request.get_json()
-        
-        if not data:
-            logger.warning("Получен пустой webhook")
-            return {'ok': True}, 200
-        
-        logger.info(f"📥 Webhook получен: update_id={data.get('update_id')}")
-        
-        # Обрабатываем сообщение
-        if 'message' in data:
-            bot.handle_message(data['message'])
-        
-        return {'ok': True}, 200
-    except Exception as e:
-        logger.error(f"Ошибка обработки webhook: {e}")
-        return {'ok': False, 'error': str(e)}, 500
-
-
-@app.route('/set-webhook', methods=['POST'])
-def set_webhook():
-    """Регистрирует webhook в Telegram API"""
-    try:
-        webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
-        logger.info(f"Регистрирую webhook: {webhook_url}")
-        
-        data = {"url": webhook_url}
-        
-        response = httpx.post(
-            f"{TELEGRAM_API_URL}/setWebhook",
-            json=data,
-            timeout=10
+        sheet_manager = SheetManager(
+            credentials_json=CREDENTIALS_JSON,
+            credentials_path=CREDENTIALS_PATH if not CREDENTIALS_JSON else None,
+            sheet_id=SHEET_ID,
+            sheet_name=SHEET_NAME
         )
-        
-        result = response.json()
-        logger.info(f"✅ Ответ setWebhook: {result}")
-        return result, 200
+        bot = TelegramBot(TELEGRAM_TOKEN, sheet_manager)
+        logger.info("✅ Бот инициализирован успешно")
     except Exception as e:
-        logger.error(f"❌ Ошибка регистрации webhook: {e}")
-        return {'ok': False, 'error': str(e)}, 500
+        logger.error(f"❌ Ошибка инициализации: {e}")
+        raise
 
+    @app.route('/health', methods=['GET'])
+    def health():
+        """Health check endpoint для мониторинга"""
+        return {'status': 'ok', 'timestamp': datetime.now().isoformat()}, 200
 
-@app.errorhandler(404)
-def not_found(error):
-    """Обработка 404 ошибок"""
-    return {'error': 'Not found'}, 404
+    @app.route(WEBHOOK_PATH, methods=['POST'])
+    def telegram_webhook():
+        """Основной webhook для получения обновлений от Telegram"""
+        try:
+            data = request.get_json()
+            
+            if not data:
+                logger.warning("Получен пустой webhook")
+                return {'ok': True}, 200
+            
+            logger.info(f"📥 Webhook получен: update_id={data.get('update_id')}")
+            
+            # Обрабатываем сообщение
+            if 'message' in data:
+                bot.handle_message(data['message'])
+            
+            return {'ok': True}, 200
+        except Exception as e:
+            logger.error(f"Ошибка обработки webhook: {e}")
+            return {'ok': False, 'error': str(e)}, 500
 
+    @app.route('/init-webhook', methods=['GET', 'POST'])
+    def init_webhook():
+        """Регистрирует webhook в Telegram API (НОВЫЙ ENDPOINT)"""
+        try:
+            webhook_url = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
+            logger.info(f"🔧 Регистрирую webhook: {webhook_url}")
+            
+            data = {"url": webhook_url}
+            
+            response = httpx.post(
+                f"{TELEGRAM_API_URL}/setWebhook",
+                json=data,
+                timeout=10
+            )
+            
+            result = response.json()
+            logger.info(f"✅ Ответ setWebhook: {result}")
+            return result, 200
+        except Exception as e:
+            logger.error(f"❌ Ошибка регистрации webhook: {e}")
+            return {'ok': False, 'error': str(e)}, 500
 
-@app.errorhandler(500)
-def internal_error(error):
-    """Обработка 500 ошибок"""
-    logger.error(f"Internal server error: {error}")
-    return {'error': 'Internal server error'}, 500
+    @app.errorhandler(404)
+    def not_found(error):
+        """Обработка 404 ошибок"""
+        return {'error': 'Not found'}, 404
 
+    @app.errorhandler(500)
+    def internal_error(error):
+        """Обработка 500 ошибок"""
+        logger.error(f"Internal server error: {error}")
+        return {'error': 'Internal server error'}, 500
+
+    return app
+
+# Создаем app для Gunicorn
+app = create_app()
 
 if __name__ == '__main__':
     port = int(os.getenv("PORT", 5000))
     logger.info(f"🚀 Запуск бота на порту {port}")
     logger.info(f"📍 Webhook URL: {WEBHOOK_URL}{WEBHOOK_PATH}")
+    
+    # Инициализируем webhook при старте (если это локальный запуск)
+    import threading
+    def init_webhook_on_start():
+        time.sleep(2)  # Даем приложению время на старт
+        logger.info("🔄 Инициализирую webhook...")
+        try:
+            with app.test_client() as client:
+                response = client.get('/init-webhook')
+                logger.info(f"Webhook инициализирован: {response}")
+        except Exception as e:
+            logger.error(f"Ошибка при инициализации webhook: {e}")
+    
+    webhook_thread = threading.Thread(target=init_webhook_on_start, daemon=True)
+    webhook_thread.start()
+    
     app.run(host='0.0.0.0', port=port, debug=False)
