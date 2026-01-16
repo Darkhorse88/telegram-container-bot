@@ -1,6 +1,7 @@
 # 🤖 TELEGRAM BOT - Проверка оплаты контейнеров
-# Версия: 2.2 (WEBHOOK MODE) - PRODUCTION READY
-# ✅ СТАТУСЫ: Оплачено | Оплаты нет | Постоплата (С БОЛЬШОЙ БУКВЫ)
+# Версия: 2.3 (WEBHOOK MODE) - PRODUCTION READY - ALL FIXED
+# ✅ STATUSES: Оплачено | Оплаты нет | Постоплата
+# ✅ APP INSTANCE EXPORTED FOR GUNICORN
 
 import os
 import json
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 # ⚙️ КОНФИГУРАЦИЯ (БЕЗОПАСНАЯ)
 # ════════════════════════════════════════════════════════════════
 
+# 🔐 Получаем токен из переменных окружения (НЕ жестко закодирован!)
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     logger.error("❌ ОШИБКА: TELEGRAM_TOKEN не установлен в переменных окружения!")
@@ -33,6 +35,7 @@ if not TELEGRAM_TOKEN:
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
+# Webhook URL для регистрации бота
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 if not WEBHOOK_URL:
     logger.error("❌ ОШИБКА: WEBHOOK_URL не установлена в переменных окружения!")
@@ -40,9 +43,11 @@ if not WEBHOOK_URL:
 
 WEBHOOK_PATH = "/telegram"
 
+# Google Sheets конфигурация
 SHEET_ID = os.getenv("SHEET_ID", "1cTfkGG2HC8HQBgt8ePfpQ-diyoJStvvEx4EAOdYmcbk")
 SHEET_NAME = os.getenv("SHEET_NAME", "Контейнеры")
 
+# Credentials - НОВЫЙ СПОСОБ (из переменной окружения)
 CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS")
 if not CREDENTIALS_JSON:
     logger.warning("⚠️ GOOGLE_CREDENTIALS не установлены. Попытка загрузить из файла...")
@@ -397,6 +402,8 @@ def create_app():
 # 🚀 ЗАПУСК ПРИЛОЖЕНИЯ
 # ════════════════════════════════════════════════════════════════
 
+# ✅ СОЗДАЕМ ПРИЛОЖЕНИЕ НА ВЕРХНЕМ УРОВНЕ (ДЛЯ GUNICORN!)
+app = create_app()
+
 if __name__ == '__main__':
-    app = create_app()
     app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)))
